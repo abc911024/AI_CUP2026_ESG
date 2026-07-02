@@ -1,175 +1,134 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-ESG 承諾與證據標註 — 一鍵批次流程（Gemini）
-=================================================
-讀取輸入 JSON -> 逐筆呼叫 Gemini（schema 強制結構化輸出）
--> 存成結果 JSON -> 印出統計摘要。
+# ESG 承諾與證據標註（ESG Promise & Evidence Annotation）
 
-用法：
-    python annotate.py
-    python annotate.py --input data/extracted_data_with_id.json --model gemini-2.5-pro
-    python annotate.py --limit 30          # 先試跑前 30 筆
-"""
+使用 Gemini 自動標註繁體中文企業永續報告書段落，抽取 **ESG 承諾（promise）** 與 **對應證據（evidence）**，並判斷 **驗證時程** 與 **證據品質**。
 
-import argparse
-import json
-import os
-import sys
-import time
-from collections import Counter
-from typing import Literal
+跑一行指令即可完成整個流程：讀取資料 → 逐筆呼叫 Gemini（schema 強制結構化輸出）→ 存結果 → 印出統計。
 
-from google import genai
-from pydantic import BaseModel
+---
 
+## Quick Start
 
-# ============================================================
-# 輸出結構（schema：Gemini 會被強制只回這些欄位、值落在允許範圍）
-# ============================================================
-class Annotation(BaseModel):
-    promise_status: Literal["Yes", "No"]
-    promise_string: str
-    verification_timeline: Literal[
-        "already",
-        "within_2_years",
-        "between_2_and_5_years",
-        "more_than_5_years",
-        "N/A",
-    ]
-    evidence_status: Literal["Yes", "No", "N/A"]
-    evidence_string: str
-    evidence_quality: Literal["Clear", "Not Clear", "Misleading", "N/A"]
+```bash
+# 1. 安裝相依套件
+pip install -r requirements.txt
 
+# 2. 設定 API 金鑰（到 https://aistudio.google.com/apikey 申請）
+export GEMINI_API_KEY="your_api_key_here"      # Windows: set GEMINI_API_KEY=...
 
-# ============================================================
-# 任務說明 + few-shot 範例（教模型如何判斷標籤與擷取片段）
-# ============================================================
-TASK_PROMPT = """You are an expert in extracting ESG-related promises and their corresponding evidence from corporate reports.
+# 3. 一鍵執行
+python annotate.py
+```
 
-Analyze the given Traditional Chinese paragraph from a corporate ESG report and produce the annotation.
+執行後產生 `annotated_results.json`，並在終端印出各標籤分佈統計。
 
-Labels:
-- promise_status: "Yes" if the paragraph contains an ESG-related promise (a principle, commitment, or strategy), otherwise "No".
-- promise_string: the exact wording of the promise, copied verbatim (use "" if no promise). If the promise consists of MULTIPLE non-contiguous fragments, copy each fragment verbatim and join them with " ｜ " (a full-width vertical bar surrounded by single spaces).
-- verification_timeline: Based on the meaning of the text, infer the expected completion time of the promise, counting from the year 2024 (the report publication year). Choose exactly ONE:
-    - "already": already implemented and verifiable in the current period.
-    - "within_2_years": short-term plan, verifiable within 2 years.
-    - "between_2_and_5_years": medium-to-long-term plan, verifiable within 2 to 5 years. ALSO use this when the promise does not explicitly state a target completion year.
-    - "more_than_5_years": long-term plan, verifiable after more than 5 years.
-    - "N/A": use ONLY when promise_status is "No".
-  If promise_status is "Yes", verification_timeline must NEVER be "N/A".
-- evidence_status: "Yes" if evidence supports the promise, "No" if not, "N/A" if no promise.
-- evidence_string: the supporting evidence, copied verbatim (use "" if none). If multiple non-contiguous fragments, join them with " ｜ ".
-- evidence_quality: "Clear" (sufficient and logical) / "Not Clear" (partial or superficial) / "Misleading" (unrelated, diverts attention) / "N/A".
+先試跑小量再全量：
 
-Reference examples (paragraph -> labels):
+```bash
+python annotate.py --limit 30                  # 只跑前 30 筆
+python annotate.py --model gemini-2.5-pro      # 換更強的模型
+```
 
-[Example 1]
-統一超商積極透過推動綠色採購管理設備、耗材與建材，選擇綠建材進行門市裝修並採購取得節能標章、環保標章或驗證或具有實際環保效益的設備與耗材應用於門市
--> promise_status: Yes | promise_string: "統一超商積極透過推動綠色採購管理設備、耗材與建材" | verification_timeline: within_2_years | evidence_status: Yes | evidence_string: "選擇綠建材進行門市裝修並採購取得節能標章、環保標章或驗證或具有實際環保效益的設備與耗材應用於門市" | evidence_quality: Clear
+---
 
-[Example 2]
-和碩由董事長童子賢先生公開宣誓集團對長期節能減碳的決心…企總及各主要製造廠區皆成立溫室氣體盤查委員會…進一步擬定減量計畫及設定減量目標。
--> promise_status: Yes | promise_string: "和碩由董事長童子賢先生公開宣誓集團對長期節能減碳的決心，期能在集團的共同努力下，對全球溫室氣體減量能有所貢獻" | verification_timeline: more_than_5_years | evidence_status: Yes | evidence_string: "企總及各主要製造廠區皆成立溫室氣體盤查委員會，進行溫室氣體盤查與管理，釐清轄屬的溫室氣體排放源，以此為依據進一步擬定減量計畫及設定減量目標" | evidence_quality: Clear
+## 資料格式
 
-[Example 3]
-為響應主管機關推動職場不法侵害預防，公司透過跨單位合作，逐項檢視各項執行作為，設定短、中、長期執行目標…相關執行作為如下：
--> promise_status: Yes | promise_string: "公司透過跨單位合作，逐項檢視各項執行作為，設定短、中、長期執行目標，從軟體到硬體，進行檢視、補強與強化，增加安全保護機制營造友善職場" | verification_timeline: more_than_5_years | evidence_status: Yes | evidence_string: "公司透過跨單位合作，逐項檢視各項執行作為，設定短、中、長期執行目標，從軟體到硬體，進行檢視、補強與強化，增加安全保護機制" | evidence_quality: Not Clear
+輸入 `data/extracted_data_with_id.json`：物件陣列（共 1000 筆，id 10001–11000），每筆含 `id` 與 `data`（一段繁體中文 ESG 報告內文）。
 
-[Example 4 — joining multiple non-contiguous fragments with " ｜ "]
-為有效預防控制職業危害，公司制訂有「職業病控制管理規定」。公司對所涉及的職業病危害項目由營運服務部向政府部門進行申報…對於職業傷害，公司均落實改善措施，包括：增設設備安全防護，嚴格落實設備點檢與保養，加強安全教育培訓，管理人員高頻巡檢，完善安全操作規範。
--> promise_status: Yes | promise_string: "為有效預防控制職業危害，公司制訂有「職業病控制管理規定」。 ｜ 對於職業傷害，公司均落實改善措施，" | verification_timeline: already | evidence_status: Yes | evidence_string: "公司對所涉及的職業病危害項目由營運服務部向政府部門進行申報，由有資質的技術服務機構提供評價工作，並獲得相關部門的驗收批復。根據危險辨識與控制內容對從事接觸職業病危害因素工作的員工進行職業培訓及崗前、崗中、崗後職業健康檢查。 ｜ 包括：增設設備安全防護，嚴格落實設備點檢與保養，加強安全教育培訓，管理人員高頻巡檢，完善安全操作規範。" | evidence_quality: Clear
+```json
+{ "id": "10001", "data": "聯發科技除在「工作規則」中依照勞基法…" }
+```
 
-Now analyze the following paragraph:
+---
 
-"""
+## 標註結構
 
+| 欄位 | 允許值 | 說明 |
+|------|--------|------|
+| `promise_status` | `Yes` / `No` | 段落是否包含 ESG 承諾（原則、承諾、策略） |
+| `promise_string` | 字串 | 逐字擷取的承諾；多片段以「 ｜ 」串接；無承諾為 `""` |
+| `verification_timeline` | 見下 | 承諾預期完成／可驗證時程 |
+| `evidence_status` | `Yes` / `No` / `N/A` | 是否有支持承諾的證據 |
+| `evidence_string` | 字串 | 逐字擷取的證據；多片段以「 ｜ 」串接；無證據為 `""` |
+| `evidence_quality` | `Clear` / `Not Clear` / `Misleading` / `N/A` | 證據與承諾之關聯品質 |
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="ESG promise/evidence annotation pipeline (Gemini).")
-    p.add_argument("--input", default="data/extracted_data_with_id.json", help="輸入 JSON 路徑")
-    p.add_argument("--output", default="annotated_results.json", help="輸出 JSON 路徑")
-    p.add_argument("--model", default="gemini-2.5-flash",
-                   help="Gemini 模型（gemini-2.5-flash / gemini-2.5-pro / gemini-3.1-pro）")
-    p.add_argument("--limit", type=int, default=None, help="只處理前 N 筆（試跑用）")
-    p.add_argument("--sleep", type=float, default=0.0, help="每筆間隔秒數（遇 rate limit 可調大）")
-    return p.parse_args()
+**`verification_timeline`（以報告書公開年份 2024 起算）**
 
+| 值 | 定義 |
+|----|------|
+| `already` | 已實行，可於當期驗證 |
+| `within_2_years` | 短期，2 年內可驗證 |
+| `between_2_and_5_years` | 中長期，2–5 年可驗證；**未明示目標完成年份時亦選此** |
+| `more_than_5_years` | 長期，5 年以上可驗證 |
+| `N/A` | **僅在** `promise_status` 為 `No` 時使用 |
 
-def annotate_one(client: genai.Client, model: str, paragraph: str) -> dict:
-    response = client.models.generate_content(
-        model=model,
-        contents=TASK_PROMPT + paragraph,
-        config={
-            "response_mime_type": "application/json",
-            "response_schema": Annotation,
-        },
-    )
-    if response.parsed:
-        return response.parsed.model_dump()
-    return json.loads(response.text)
+> 規則：`promise_status` 為 `Yes` 時，`verification_timeline` 不得為 `N/A`。
 
+**多片段擷取**：當承諾或證據由文中多個不連續片段組成時，各片段逐字擷取後以全形分隔符「 ｜ 」（前後各一空格）串接。
 
-def print_stats(results: list) -> None:
-    print("\n" + "=" * 48)
-    print(f"總筆數：{len(results)}")
-    errors = [r for r in results if "error" in r]
-    print(f"錯誤筆數：{len(errors)}")
-    ok = [r for r in results if "error" not in r]
-    for field in ("promise_status", "verification_timeline", "evidence_status", "evidence_quality"):
-        counts = Counter(r.get(field, "?") for r in ok)
-        dist = "  ".join(f"{k}={v}" for k, v in counts.most_common())
-        print(f"{field:22s}: {dist}")
-    print("=" * 48)
+---
 
+## 輸出格式
 
-def main() -> None:
-    args = parse_args()
+單一 JSON 陣列，每筆保留原始 `id` 與 `data`，key 順序固定為
+`id` → `data` → `promise_status` → `promise_string` → `verification_timeline` → `evidence_status` → `evidence_string` → `evidence_quality`。
 
-    if not os.path.exists(args.input):
-        sys.exit(f"找不到輸入檔：{args.input}")
+```json
+{
+  "id": "11001",
+  "data": "為有效預防控制職業危害，公司制訂有「職業病控制管理規定」。…完善安全操作規範。",
+  "promise_status": "Yes",
+  "promise_string": "為有效預防控制職業危害，公司制訂有「職業病控制管理規定」。 ｜ 對於職業傷害，公司均落實改善措施，",
+  "verification_timeline": "already",
+  "evidence_status": "Yes",
+  "evidence_string": "公司對所涉及的職業病危害項目由營運服務部向政府部門進行申報… ｜ 包括：增設設備安全防護…完善安全操作規範。",
+  "evidence_quality": "Clear"
+}
+```
 
-    with open(args.input, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if args.limit:
-        data = data[: args.limit]
+---
 
-    # 斷點續跑：載入既有結果
-    results: dict[str, dict] = {}
-    if os.path.exists(args.output):
-        with open(args.output, "r", encoding="utf-8") as f:
-            for item in json.load(f):
-                results[item["id"]] = item
-        print(f"已載入 {len(results)} 筆既有結果，將略過這些 id。")
+## 特性
 
-    client = genai.Client()  # 讀取 GEMINI_API_KEY / GOOGLE_API_KEY 環境變數
-    total = len(data)
+- **一鍵全流程**：`python annotate.py` 完成讀取、標註、存檔、統計。
+- **Schema 強制輸出**：以 `response_schema`（Pydantic）確保每筆欄位與允許值正確。
+- **斷點續跑**：每筆完成即寫檔，中斷後重跑自動略過已完成 id。
+- **單筆錯誤不中斷**：失敗筆記錄 `error` 欄位，重跑即補做。
+- **統計摘要**：結束時列出 promise / timeline / evidence 各類別分佈與錯誤數。
 
-    for i, row in enumerate(data, 1):
-        rid = row["id"]
-        if rid in results:
-            continue
-        try:
-            ann = annotate_one(client, args.model, row["data"])
-            # 固定 key 順序：id -> data -> 六個標註欄位
-            results[rid] = {"id": rid, "data": row["data"], **ann}
-            print(f"[{i}/{total}] id={rid}  promise={ann.get('promise_status')}  "
-                  f"timeline={ann.get('verification_timeline')}")
-        except Exception as e:
-            results[rid] = {"id": rid, "data": row["data"], "error": str(e)}
-            print(f"[{i}/{total}] id={rid}  ERROR: {e}", file=sys.stderr)
+### 指令參數
 
-        # 每筆即時存檔，確保中斷不丟進度
-        with open(args.output, "w", encoding="utf-8") as f:
-            json.dump(list(results.values()), f, ensure_ascii=False, indent=2)
+| 參數 | 預設 | 說明 |
+|------|------|------|
+| `--input` | `data/extracted_data_with_id.json` | 輸入路徑 |
+| `--output` | `annotated_results.json` | 輸出路徑 |
+| `--model` | `gemini-2.5-flash` | 模型（另可 `gemini-2.5-pro` / `gemini-3.1-pro`） |
+| `--limit` | 無 | 只處理前 N 筆（試跑） |
+| `--sleep` | `0` | 每筆間隔秒數（遇 rate limit 可調大） |
 
-        if args.sleep:
-            time.sleep(args.sleep)
+---
 
-    print(f"\n完成，結果寫入 {args.output}")
-    print_stats(list(results.values()))
+## 檔案結構
 
+```
+esg-annotation/
+├── annotate.py        # 一鍵標註主程式（方式 B：API 全量）
+├── prompt.txt         # 網頁版 prompt（方式 A：Gemini 網頁上傳貼上用）
+├── requirements.txt
+├── .env.example
+├── .gitignore
+├── README.md
+└── data/
+    └── extracted_data_with_id.json    # 輸入資料
+```
 
-if __name__ == "__main__":
-    main()
+## 兩種執行方式
+
+- **方式 B（建議）**：如上 Quick Start，適合完整 1000 筆正式標註。
+- **方式 A（快速測試）**：將 `data/extracted_data_with_id.json` 上傳至 Gemini 網頁，貼上 `prompt.txt` 全文送出。適合驗證 prompt 效果；一次處理大量時網頁常會中途截斷，正式標註請用方式 B。
+
+---
+
+## 備註
+
+- `data/extracted_data_with_id.json` 為研究資料。若不希望公開於 GitHub，推送前可自 `data/` 移除，並在 `.gitignore` 加入 `data/`。
+- few-shot 範例已涵蓋 `already` / `within_2_years` / `more_than_5_years` / `Clear` / `Not Clear`。若 `between_2_and_5_years`、`No`、`Misleading` 判別不準，補一兩個對應範例通常能明顯改善。
