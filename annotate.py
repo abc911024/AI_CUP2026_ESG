@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ESG 承諾與證據標註 — 一鍵批次流程（Gemini）
+階段 2：ESG 承諾與證據標註（Gemini）
 =================================================
-讀取輸入 JSON -> 逐筆呼叫 Gemini（schema 強制結構化輸出）
--> 存成結果 JSON -> 印出統計摘要。
+讀取輸入（JSON/CSV）-> 逐筆呼叫 Gemini（schema 強制結構化輸出，
+若有階段 1 retrieve.py 產生的檢索結果則當動態 few-shot）
+-> 存成完整結果 JSON + 競賽提交 CSV -> 印出統計摘要。
 
 用法：
-    python annotate.py
-    python annotate.py --input data/extracted_data_with_id.json --model gemini-2.5-pro
-    python annotate.py --limit 30          # 先試跑前 30 筆
+    python retrieve.py                                  # 階段 1：先產生 data/retrieved_examples.json
+    python annotate.py                                  # 階段 2：標註 + 產生 submission.csv
+    python annotate.py --model gemini-2.5-pro
+    python annotate.py --limit 30                        # 先試跑前 30 筆
 """
 
 import argparse
+import csv
 import json
 import os
 import sys
@@ -22,6 +25,10 @@ from typing import Literal
 
 from google import genai
 from pydantic import BaseModel
+
+SUBMISSION_FIELDS = [
+    "id", "promise_status", "verification_timeline", "evidence_status", "evidence_quality",
+]
 
 
 # ============================================================
@@ -43,9 +50,10 @@ class Annotation(BaseModel):
 
 
 # ============================================================
-# 任務說明 + few-shot 範例（教模型如何判斷標籤與擷取片段）
+# 任務說明（固定）+ few-shot 範例（動態：來自 retrieve.py 檢索結果；
+# 若某筆查無檢索結果則退回下方固定範例）
 # ============================================================
-TASK_PROMPT = """You are an expert in extracting ESG-related promises and their corresponding evidence from corporate reports.
+TASK_INSTRUCTIONS = """You are an expert in extracting ESG-related promises and their corresponding evidence from corporate reports.
 
 Analyze the given Traditional Chinese paragraph from a corporate ESG report and produce the annotation.
 
@@ -61,11 +69,9 @@ Labels:
   If promise_status is "Yes", verification_timeline must NEVER be "N/A".
 - evidence_status: "Yes" if evidence supports the promise, "No" if not, "N/A" if no promise.
 - evidence_string: the supporting evidence, copied verbatim (use "" if none). If multiple non-contiguous fragments, join them with " ｜ ".
-- evidence_quality: "Clear" (sufficient and logical) / "Not Clear" (partial or superficial) / "Misleading" (unrelated, diverts attention) / "N/A".
+- evidence_quality: "Clear" (sufficient and logical) / "Not Clear" (partial or superficial) / "Misleading" (unrelated, diverts attention) / "N/A"."""
 
-Reference examples (paragraph -> labels):
-
-[Example 1]
+FIXED_EXAMPLES = """[Example 1]
 統一超商積極透過推動綠色採購管理設備、耗材與建材，選擇綠建材進行門市裝修並採購取得節能標章、環保標章或驗證或具有實際環保效益的設備與耗材應用於門市
 -> promise_status: Yes | promise_string: "統一超商積極透過推動綠色採購管理設備、耗材與建材" | verification_timeline: within_2_years | evidence_status: Yes | evidence_string: "選擇綠建材進行門市裝修並採購取得節能標章、環保標章或驗證或具有實際環保效益的設備與耗材應用於門市" | evidence_quality: Clear
 
@@ -79,17 +85,42 @@ Reference examples (paragraph -> labels):
 
 [Example 4 — joining multiple non-contiguous fragments with " ｜ "]
 為有效預防控制職業危害，公司制訂有「職業病控制管理規定」。公司對所涉及的職業病危害項目由營運服務部向政府部門進行申報…對於職業傷害，公司均落實改善措施，包括：增設設備安全防護，嚴格落實設備點檢與保養，加強安全教育培訓，管理人員高頻巡檢，完善安全操作規範。
--> promise_status: Yes | promise_string: "為有效預防控制職業危害，公司制訂有「職業病控制管理規定」。 ｜ 對於職業傷害，公司均落實改善措施，" | verification_timeline: already | evidence_status: Yes | evidence_string: "公司對所涉及的職業病危害項目由營運服務部向政府部門進行申報，由有資質的技術服務機構提供評價工作，並獲得相關部門的驗收批復。根據危險辨識與控制內容對從事接觸職業病危害因素工作的員工進行職業培訓及崗前、崗中、崗後職業健康檢查。 ｜ 包括：增設設備安全防護，嚴格落實設備點檢與保養，加強安全教育培訓，管理人員高頻巡檢，完善安全操作規範。" | evidence_quality: Clear
+-> promise_status: Yes | promise_string: "為有效預防控制職業危害，公司制訂有「職業病控制管理規定」。 ｜ 對於職業傷害，公司均落實改善措施，" | verification_timeline: already | evidence_status: Yes | evidence_string: "公司對所涉及的職業病危害項目由營運服務部向政府部門進行申報，由有資質的技術服務機構提供評價工作，並獲得相關部門的驗收批復。根據危險辨識與控制內容對從事接觸職業病危害因素工作的員工進行職業培訓及崗前、崗中、崗後職業健康檢查。 ｜ 包括：增設設備安全防護，嚴格落實設備點檢與保養，加強安全教育培訓，管理人員高頻巡檢，完善安全操作規範。" | evidence_quality: Clear"""
 
-Now analyze the following paragraph:
 
-"""
+def load_rows(path: str) -> list:
+    """讀輸入資料，依副檔名判斷 JSON 或 CSV，回傳 list[dict]（至少含 id、data）。"""
+    if path.lower().endswith(".csv"):
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
+            return list(csv.DictReader(f))
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def build_examples_block(retrieved: list) -> str:
+    """把 retrieve.py 檢索到的範例組成 few-shot 文字區塊。"""
+    lines = []
+    for i, ex in enumerate(retrieved, 1):
+        lines.append(f"[Example {i}]\n{ex.get('text', '')}\n-> {ex.get('labels', '')}")
+    return "\n\n".join(lines)
+
+
+def build_prompt(paragraph: str, retrieved: list) -> str:
+    examples = build_examples_block(retrieved) if retrieved else FIXED_EXAMPLES
+    return (
+        f"{TASK_INSTRUCTIONS}\n\n"
+        f"Reference examples (paragraph -> labels):\n\n{examples}\n\n"
+        f"Now analyze the following paragraph:\n\n{paragraph}"
+    )
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="ESG promise/evidence annotation pipeline (Gemini).")
-    p.add_argument("--input", default="data/extracted_data_with_id.json", help="輸入 JSON 路徑")
-    p.add_argument("--output", default="annotated_results.json", help="輸出 JSON 路徑")
+    p = argparse.ArgumentParser(description="Stage 2: LLM annotation (Gemini), with optional RAG few-shot.")
+    p.add_argument("--input", default="data/vpesg4k_test_2000.csv", help="待標段落（.json / .csv）")
+    p.add_argument("--retrieved", default="data/retrieved_examples.json",
+                   help="階段 1 retrieve.py 的檢索結果（缺檔則用固定 few-shot）")
+    p.add_argument("--output", default="annotated_results.json", help="完整標註輸出（JSON）")
+    p.add_argument("--submission", default="submission.csv", help="競賽提交檔輸出（CSV）")
     p.add_argument("--model", default="gemini-2.5-flash",
                    help="Gemini 模型（gemini-2.5-flash / gemini-2.5-pro / gemini-3.1-pro）")
     p.add_argument("--limit", type=int, default=None, help="只處理前 N 筆（試跑用）")
@@ -97,10 +128,10 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def annotate_one(client: genai.Client, model: str, paragraph: str) -> dict:
+def annotate_one(client: genai.Client, model: str, paragraph: str, retrieved: list) -> dict:
     response = client.models.generate_content(
         model=model,
-        contents=TASK_PROMPT + paragraph,
+        contents=build_prompt(paragraph, retrieved),
         config={
             "response_mime_type": "application/json",
             "response_schema": Annotation,
@@ -109,6 +140,20 @@ def annotate_one(client: genai.Client, model: str, paragraph: str) -> dict:
     if response.parsed:
         return response.parsed.model_dump()
     return json.loads(response.text)
+
+
+def write_submission(path: str, results: list) -> None:
+    rows = sorted(results, key=lambda r: str(r["id"]))
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=SUBMISSION_FIELDS)
+        writer.writeheader()
+        for r in rows:
+            if "error" in r:
+                # 失敗筆以保守值填補，確保提交檔涵蓋所有 id
+                writer.writerow({"id": r["id"], "promise_status": "No", "verification_timeline": "N/A",
+                                  "evidence_status": "N/A", "evidence_quality": "N/A"})
+            else:
+                writer.writerow({k: r.get(k, "") for k in SUBMISSION_FIELDS})
 
 
 def print_stats(results: list) -> None:
@@ -130,10 +175,17 @@ def main() -> None:
     if not os.path.exists(args.input):
         sys.exit(f"找不到輸入檔：{args.input}")
 
-    with open(args.input, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    data = load_rows(args.input)
     if args.limit:
         data = data[: args.limit]
+
+    retrieved_map: dict = {}
+    if os.path.exists(args.retrieved):
+        with open(args.retrieved, "r", encoding="utf-8") as f:
+            retrieved_map = json.load(f)
+        print(f"已載入檢索結果 {args.retrieved}，將用動態 few-shot。")
+    else:
+        print(f"[提示] 找不到 {args.retrieved}，改用固定 few-shot（可先跑 python retrieve.py 產生）。")
 
     # 斷點續跑：載入既有結果
     results: dict[str, dict] = {}
@@ -151,7 +203,7 @@ def main() -> None:
         if rid in results:
             continue
         try:
-            ann = annotate_one(client, args.model, row["data"])
+            ann = annotate_one(client, args.model, row["data"], retrieved_map.get(str(rid), []))
             # 固定 key 順序：id -> data -> 六個標註欄位
             results[rid] = {"id": rid, "data": row["data"], **ann}
             print(f"[{i}/{total}] id={rid}  promise={ann.get('promise_status')}  "
@@ -163,11 +215,12 @@ def main() -> None:
         # 每筆即時存檔，確保中斷不丟進度
         with open(args.output, "w", encoding="utf-8") as f:
             json.dump(list(results.values()), f, ensure_ascii=False, indent=2)
+        write_submission(args.submission, list(results.values()))
 
         if args.sleep:
             time.sleep(args.sleep)
 
-    print(f"\n完成，結果寫入 {args.output}")
+    print(f"\n完成，結果寫入 {args.output}、提交檔寫入 {args.submission}")
     print_stats(list(results.values()))
 
 
