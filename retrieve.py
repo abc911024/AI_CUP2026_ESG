@@ -9,11 +9,12 @@
 
 用法：
     python retrieve.py
-    python retrieve.py --corpus data/vpesg4k_train_1000.json data/qwen_augmented.json --top-k 5
+    python retrieve.py --corpus data/vpesg4k_train_1000.json --top-k 5
     python retrieve.py --queries data/vpesg4k_test_2000.json --out data/retrieved_test.json
 """
 
 import argparse
+import csv
 import json
 import os
 import sys
@@ -27,7 +28,11 @@ LABEL_FIELDS = [
 ]
 
 
-def load_json(path: str) -> list:
+def load_rows(path: str) -> list:
+    """讀 corpus/queries，依副檔名判斷 JSON 或 CSV，回傳 list[dict]。"""
+    if path.lower().endswith(".csv"):
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
+            return list(csv.DictReader(f))
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, list):
@@ -47,10 +52,10 @@ def format_labels(item: dict) -> str:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Stage 1: RAG retrieval (E5 + FAISS).")
-    p.add_argument("--queries", default="data/extracted_data_with_id.json",
-                   help="待標段落 JSON（需含 id 與文字欄位）")
+    p.add_argument("--queries", default="data/vpesg4k_test_2000.csv",
+                   help="待標段落（.json / .csv，需含 id 與文字欄位）")
     p.add_argument("--corpus", nargs="+", default=["data/vpesg4k_train_1000.json"],
-                   help="已標註範例庫 JSON（可多個檔）")
+                   help="已標註範例庫（.json / .csv，可多個檔）")
     p.add_argument("--out", default="data/retrieved_examples.json", help="檢索結果輸出路徑")
     p.add_argument("--text-field", default="data", help="文字欄位名稱")
     p.add_argument("--id-field", default="id", help="id 欄位名稱")
@@ -76,11 +81,11 @@ def main() -> None:
         if not os.path.exists(c):
             print(f"[警告] corpus 檔不存在，略過：{c}", file=sys.stderr)
             continue
-        corpus.extend(load_json(c))
+        corpus.extend(load_rows(c))
     if not corpus:
         sys.exit("corpus 為空，請確認 --corpus 路徑（應為已標註範例庫）")
 
-    queries = load_json(args.queries)
+    queries = load_rows(args.queries)
     tf, idf = args.text_field, args.id_field
 
     print(f"corpus {len(corpus)} 筆、queries {len(queries)} 筆，載入模型 {args.model} …")

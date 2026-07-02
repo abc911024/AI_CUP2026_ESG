@@ -44,14 +44,15 @@ pip install -r requirements.txt
 # 2. 設定 API 金鑰（到 https://aistudio.google.com/apikey 申請）
 export GEMINI_API_KEY="your_api_key_here"      # Windows: set GEMINI_API_KEY=...
 
-# 3. 一鍵跑完整流程（階段 1 → 階段 2）
-python run_all.py
+# 3. 依序執行兩個階段
+python retrieve.py      # 階段 1：產生 data/retrieved_examples.json
+python annotate.py      # 階段 2：標註 + 產生 annotated_results.json / submission.csv
 ```
 ---
 
 ## 資料
 
-放入 `data/`（見 `data/README.md`）：
+放入 `data/`：
 
 | 檔案 | 角色 | 說明 |
 |------|------|------|
@@ -130,7 +131,7 @@ python run_all.py
 
 ## 特性
 
-- **完整兩階段流程**：`run_all.py` 一鍵串起 RAG 檢索與 LLM 標註。
+- **兩階段流程**：先跑 `retrieve.py` 產生檢索結果，再跑 `annotate.py` 標註（依序執行的兩個獨立指令，無額外的一鍵腳本）。
 - **動態 few-shot**：每筆使用檢索到的相似範例；缺檢索結果時自動退回固定範例。
 - **Schema 強制輸出**：以 `response_schema`（Pydantic）確保欄位與允許值正確。
 - **斷點續跑**：每筆完成即寫檔，中斷後重跑自動略過已完成 id。
@@ -143,10 +144,8 @@ python run_all.py
 
 ```
 AI_CUP2026_ESG/
-├── run_all.py          # 一鍵：階段 1 → 階段 2
 ├── retrieve.py         # 階段 1：RAG 檢索（E5 + FAISS）
 ├── annotate.py         # 階段 2：LLM 標註（Gemini，動態 few-shot）+ 提交 CSV
-├── io_utils.py         # 共用：讀 JSON/CSV、寫提交 CSV
 ├── prompt.txt          # 網頁版 prompt（Gemini 網頁上傳貼上用）
 ├── requirements.txt
 ├── .env.example
@@ -154,7 +153,6 @@ AI_CUP2026_ESG/
 ├── README.md
 ├── AI_CUP_2026_VeriPromiseESG_Submission_Guidelines.pdf  # 競賽規則
 └── data/
-    ├── README.md                      # 說明應放入哪些資料
     ├── vpesg4k_test_2000.csv          # 待標段落（2000 筆，id 12001–）
     ├── vpesg4k_train_1000.json/.csv   # 訓練集（RAG 檢索語料）
     ├── vpesg4k_val_1000.json/.csv     # 驗證集
