@@ -1,0 +1,14 @@
+# secrets
+.env
+
+# outputs
+annotated_results.json
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# os
+.DS_Store
