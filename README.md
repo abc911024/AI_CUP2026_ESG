@@ -110,15 +110,22 @@ python annotate.py --model gemini-2.5-pro      # 換更強的模型
 ## 檔案結構
 
 ```
-esg-annotation/
-├── annotate.py        # 一鍵標註主程式（方式 B：API 全量）
-├── prompt.txt         # 網頁版 prompt（方式 A：Gemini 網頁上傳貼上用）
+AI_CUP2026_ESG/
+├── annotate.py         # 一鍵標註主程式（方式 B：API 全量）
+├── prompt.txt          # 網頁版 prompt（方式 A：Gemini 網頁上傳貼上用）
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
 ├── README.md
+├── AI_CUP_2026_VeriPromiseESG_Submission_Guidelines.pdf  # 競賽規則
 └── data/
-    └── extracted_data_with_id.json    # 輸入資料
+    ├── extracted_data_with_id.json    # annotate.py 輸入資料（1000 筆，id 10001–11000）
+    ├── vpesg4k_train_1000.json/.csv   # 競賽訓練集
+    ├── vpesg4k_val_1000.json/.csv     # 競賽驗證集
+    ├── vpesg4k_test_2000.json/.csv    # 競賽測試集（待標註）
+    ├── sample_submission_format.csv   # 提交格式範例
+    ├── qwen_augmented.json            # Qwen 增量標註資料
+    └── external_converted.json        # 外部資料轉換結果
 ```
 
 ## 兩種執行方式
