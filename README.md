@@ -128,7 +128,3 @@ esg-annotation/
 
 ---
 
-## 備註
-
-- `data/extracted_data_with_id.json` 為研究資料。若不希望公開於 GitHub，推送前可自 `data/` 移除，並在 `.gitignore` 加入 `data/`。
-- few-shot 範例已涵蓋 `already` / `within_2_years` / `more_than_5_years` / `Clear` / `Not Clear`。若 `between_2_and_5_years`、`No`、`Misleading` 判別不準，補一兩個對應範例通常能明顯改善。
