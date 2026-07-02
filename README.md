@@ -1,6 +1,8 @@
 # ESG 承諾與證據標註（ESG Promise & Evidence Annotation）
 
-使用 Gemini 自動標註繁體中文企業永續報告書段落，抽取 **ESG 承諾（promise）** 與 **對應證據（evidence）**，並判斷 **驗證時程** 與 **證據品質**。
+使用LLM自動標註繁體中文企業永續報告書段落，抽取 **ESG 承諾（promise）** 與 **對應證據（evidence）**，並判斷 **驗證時程** 與 **證據品質**。
+本專案目前使用Gemini 2.5flash
+
 
 跑一行指令即可完成整個流程：讀取資料 → 逐筆呼叫 Gemini（schema 強制結構化輸出）→ 存結果 → 印出統計。
 
@@ -21,12 +23,6 @@ python annotate.py
 
 執行後產生 `annotated_results.json`，並在終端印出各標籤分佈統計。
 
-先試跑小量再全量：
-
-```bash
-python annotate.py --limit 30                  # 只跑前 30 筆
-python annotate.py --model gemini-2.5-pro      # 換更強的模型
-```
 
 ---
 
@@ -128,10 +124,6 @@ AI_CUP2026_ESG/
     └── external_converted.json        # 外部資料轉換結果
 ```
 
-## 兩種執行方式
-
-- **方式 B（建議）**：如上 Quick Start，適合完整 1000 筆正式標註。
-- **方式 A（快速測試）**：將 `data/extracted_data_with_id.json` 上傳至 Gemini 網頁，貼上 `prompt.txt` 全文送出。適合驗證 prompt 效果；一次處理大量時網頁常會中途截斷，正式標註請用方式 B。
 
 ---
 
