@@ -72,7 +72,7 @@ python run_all.py
 | `--corpus` | `data/vpesg4k_train_1000.json` | 已標註語料（可多檔） |
 | `--out` | `data/retrieved_examples.json` | 檢索結果輸出 |
 | `--text-field` | `data` | 文字欄位 |
-| `--top-k` | `3` | 每筆檢索範例數 |
+| `--top-k` | `６` | 每筆檢索範例數 |
 | `--model` | `intfloat/multilingual-e5-large` | E5 模型 |
 | `--batch-size` | `32` | 編碼 batch size |
 
